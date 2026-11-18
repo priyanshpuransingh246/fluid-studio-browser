@@ -12,9 +12,9 @@ jobs:
       - name: Step 1 - Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Step 2 - Unpack Fluid Studio Multiplicator v20.0 Android Source
+      - name: Step 2 - Unpack Fluid Studio Multiplicator v20.0 Source
         run: |
-          rm -rf app build.gradle settings.gradle
+          rm -rf app build.gradle settings.gradle build
           cat << 'B64EOF' | tr -d ' \n\r' | base64 -d > project_bundle.zip
           UEsDBBQAAAAIALNxcl20sCKnfwAAAPUAAAAMAAAAYnVpbGQuZ3JhZGxlrY4xDsIwDEX3nCJbYcnQ
           CXXlJG5ihSA3jmzDgnL3UhQhsfOGP7zh6a+PQkmjlGb+5fwbwcZajKWgDnWQmTPh6fwVGzyxXrGa
@@ -1317,20 +1317,61 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Step 4 - Configure Pre-Installed Android SDK
+      - name: Step 4 - Compile & Sign APK Directly with Android SDK Tools (Zero Maven/Gradle Dependencies)
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          set -e
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          PLATFORM_JAR=$(ls -d "$SDK_ROOT"/platforms/android-* | sort -V | tail -n 1)/android.jar
+          BUILD_TOOLS=$(ls -d "$SDK_ROOT"/build-tools/* | sort -V | tail -n 1)
+          echo "Using Platform: $PLATFORM_JAR"
+          echo "Using Build-Tools: $BUILD_TOOLS"
 
-      - name: Step 5 - Setup Gradle 8.5
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.5'
+          mkdir -p build/classes build/dex app/build/outputs/apk/debug
 
-      - name: Step 6 - Compile Debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+          # 1. Compile Java sources
+          javac -source 17 -target 17 -encoding UTF-8 \
+            -cp "$PLATFORM_JAR" \
+            -d build/classes \
+            app/src/main/java/com/itihaskar/browser/MainActivity.java
 
-      - name: Step 7 - Upload Ready-to-Install Fluid Studio APK
+          # 2. Convert .class files to classes.dex using d8
+          "$BUILD_TOOLS/d8" --lib "$PLATFORM_JAR" \
+            --output build/dex \
+            build/classes/com/itihaskar/browser/*.class
+
+          # 3. Link AndroidManifest.xml with aapt2
+          "$BUILD_TOOLS/aapt2" link \
+            -o build/unaligned.apk \
+            -I "$PLATFORM_JAR" \
+            --manifest app/src/main/AndroidManifest.xml \
+            --auto-add-overlay
+
+          # 4. Package classes.dex and assets/ into the APK
+          cp build/dex/classes.dex .
+          zip -q -j build/unaligned.apk classes.dex
+          (cd app/src/main && zip -q -r ../../../build/unaligned.apk assets/)
+
+          # 5. Zipalign & Sign the APK (v1 + v2 + v3 signatures)
+          "$BUILD_TOOLS/zipalign" -f -p 4 build/unaligned.apk build/aligned.apk
+          rm -f debug.keystore
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks debug.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out app/build/outputs/apk/debug/app-debug.apk \
+            build/aligned.apk
+
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Step 5 - Upload Ready-to-Install Fluid Studio APK
         uses: actions/upload-artifact@v4
         with:
           name: Fluid-Studio-Multiplicator-APK
