@@ -1317,8 +1317,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Step 4 - Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Step 4 - Configure Pre-Installed Android SDK
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
 
       - name: Step 5 - Setup Gradle 8.5
         uses: gradle/actions/setup-gradle@v3
